@@ -23,7 +23,9 @@ ONTOLOGY_EXTENSIONS = ('.owl', '.rdf', '.ttl', '.xml')
 
 def parse_camel_plus(string: str) -> List[str]:
     """Split a CamelCase / snake_case name into lower-cased words."""
-    matches = re.finditer('.+?(?:(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|$)', string)
+    matches = re.finditer(
+        '.+?(?:(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|$)', string
+    )
     words = [w for m in matches for w in m.group(0).replace('_', ' ').split()]
     return [word.lower() for word in words]
 
@@ -32,23 +34,35 @@ def embed_text(sentence: Union[str, List[str]], model: Word2Vec) -> np.ndarray:
     """Average the embeddings of the words the model knows."""
     if isinstance(sentence, str):
         sentence = sentence.split()
-    vectors = [model.wv.get_vector(w) for w in sentence if w in model.wv.key_to_index]
+    vectors = [
+        model.wv.get_vector(w) for w in sentence if w in model.wv.key_to_index
+    ]
     if not vectors:
-        raise ValueError(f"no words recognized in the given sentence: {sentence}")
+        raise ValueError(
+            f"no words recognized in the given sentence: {sentence}"
+        )
     return np.mean(vectors, axis=0).astype(np.float32)
 
 
-def load_ontologies(ontology_dir: str = ONTOLOGY_DIR) -> List[owlready2.Ontology]:
+def load_ontologies(
+    ontology_dir: str = ONTOLOGY_DIR,
+) -> List[owlready2.Ontology]:
     return [
-        owlready2.get_ontology(os.path.abspath(os.path.join(ontology_dir, f))).load()
+        owlready2.get_ontology(
+            os.path.abspath(os.path.join(ontology_dir, f))
+        ).load()
         for f in sorted(os.listdir(ontology_dir))
         if f.endswith(ONTOLOGY_EXTENSIONS)
     ]
 
 
-def embed_classes(ontologies: List[owlready2.Ontology], model: Word2Vec,
-                  verbose: bool = True) -> Dict[str, List[Tuple[str, np.ndarray]]]:
-    """Map ontology IRI -> list of (class IRI, embedding); two embeddings per class (IRI + name)."""
+def embed_classes(
+    ontologies: List[owlready2.Ontology], model: Word2Vec, verbose: bool = True
+) -> Dict[str, List[Tuple[str, np.ndarray]]]:
+    """Map ontology IRI -> list of (class IRI, embedding).
+
+    Each class gets two embeddings: its IRI vector and its name vector.
+    """
     onto_iri2embeds: Dict[str, List[Tuple[str, np.ndarray]]] = dict()
     for onto in ontologies:
         entries = onto_iri2embeds.setdefault(onto.base_iri, [])
@@ -57,11 +71,16 @@ def embed_classes(ontologies: List[owlready2.Ontology], model: Word2Vec,
             if cls.iri in model.wv.key_to_index:
                 entries.append((cls.iri, model.wv.get_vector(cls.iri)))
             try:
-                entries.append((cls.iri, embed_text(parse_camel_plus(cls.name), model)))
+                entries.append(
+                    (cls.iri, embed_text(parse_camel_plus(cls.name), model))
+                )
             except ValueError:
                 pass
         if verbose:
-            print(f'{onto.base_iri}: {len(entries)} embeddings for {len(classes)} classes')
+            print(
+                f'{onto.base_iri}: {len(entries)} embeddings '
+                f'for {len(classes)} classes'
+            )
     return onto_iri2embeds
 
 
@@ -73,12 +92,14 @@ class SearchIndex:
         self.iris = [iri for iri, _ in embeddings]
         self.n_classes = len(set(self.iris))
         vectors = np.stack([vec for _, vec in embeddings]).astype(np.float32)
-        faiss.normalize_L2(vectors)          # inner product == cosine similarity
+        faiss.normalize_L2(vectors)  # inner product == cosine similarity
         self.index = faiss.IndexFlatIP(dim)
         self.index.add(vectors)
 
-    def search(self, query: np.ndarray, k: Optional[int] = 5) -> List[Tuple[str, float]]:
-        """Top-k classes for a query vector; k=None ranks every class in the index."""
+    def search(
+        self, query: np.ndarray, k: Optional[int] = 5
+    ) -> List[Tuple[str, float]]:
+        """Top-k classes for a query vector; k=None ranks every class."""
         k = self.n_classes if k is None else k
         q = query.reshape(1, -1).astype(np.float32).copy()
         faiss.normalize_L2(q)
@@ -92,18 +113,23 @@ class SearchIndex:
         return results[:k]
 
 
-def build_indices(onto_iri2embeds: Dict[str, List[Tuple[str, np.ndarray]]],
-                  dim: int) -> Dict[str, SearchIndex]:
+def build_indices(
+    onto_iri2embeds: Dict[str, List[Tuple[str, np.ndarray]]], dim: int
+) -> Dict[str, SearchIndex]:
     """'All' index over every class, plus one index per ontology IRI."""
     name2faiss_index: Dict[str, SearchIndex] = dict()
-    name2faiss_index['All'] = SearchIndex(list(chain.from_iterable(onto_iri2embeds.values())), dim)
+    name2faiss_index['All'] = SearchIndex(
+        list(chain.from_iterable(onto_iri2embeds.values())), dim
+    )
     for ontology_iri, embeddings in onto_iri2embeds.items():
         if embeddings:
             name2faiss_index[ontology_iri] = SearchIndex(embeddings, dim)
     return name2faiss_index
 
 
-def search_text(text: str, index_name: str = 'All', k: int = 5) -> List[Tuple[str, float]]:
+def search_text(
+    text: str, index_name: str = 'All', k: int = 5
+) -> List[Tuple[str, float]]:
     """Text query against the module-level indices built in the cell below."""
     words = [w for token in text.split() for w in parse_camel_plus(token)]
     return name2faiss_index[index_name].search(embed_text(words, model), k)
@@ -115,7 +141,10 @@ if __name__ == '__main__':
     ontologies = load_ontologies(ONTOLOGY_DIR)
     onto_iri2embeds = embed_classes(ontologies, model)
     name2faiss_index = build_indices(onto_iri2embeds, model.vector_size)
-    print('Indices:', {name: idx.index.ntotal for name, idx in name2faiss_index.items()})
+    print(
+        'Indices:',
+        {name: idx.index.ntotal for name, idx in name2faiss_index.items()},
+    )
 
 # %% Example queries
 if __name__ == '__main__':
